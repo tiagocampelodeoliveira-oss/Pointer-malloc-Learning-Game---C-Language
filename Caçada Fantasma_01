@@ -1,0 +1,1139 @@
+#include "raylib.h"
+#include <stdbool.h>
+#include <math.h>
+
+// =========================================
+// ESTADOS DO JOGO
+// =========================================
+
+typedef enum GameState
+{
+    MENU,
+    GAME,
+    PAUSE,
+    INSTRUCTIONS,
+    GAME_OVER,
+    WIN
+} GameState;
+
+// =========================================
+// CONSTANTES
+// =========================================
+
+#define MAX_FANTASMAS_BASE  5
+#define MAX_FANTASMAS       12
+#define MAX_CHEFOES         10
+#define MAX_PARTICULAS      200
+#define MAX_PILARES         6
+#define PLASMA_CARGA_MAX    20
+#define CHEFAO_VIDA_MAX     2
+
+#define LARGURA_TELA        800
+#define ALTURA_TELA         500
+#define ALTURA_HUD          70
+
+#define AREA_Y_MIN          ALTURA_HUD
+#define AREA_Y_MAX          (ALTURA_TELA - 40)
+#define AREA_X_MIN          0
+#define AREA_X_MAX          (LARGURA_TELA - 40)
+
+#define RAIO_FUGA           120.0f
+#define RAIO_PORTAL         18.0f
+#define COOLDOWN_PORTAL     2.0f
+
+// =========================================
+// STRUCTS
+// =========================================
+
+typedef struct Particula
+{
+    Vector2 posicao;
+    Vector2 velocidade;
+    float   tamanho;
+    float   tempoVida;
+    float   tempoVidaMax;
+    bool    ativa;
+    Color   cor;
+} Particula;
+
+typedef struct PlasmaBall
+{
+    Vector2 posicao;
+    Vector2 direcao;
+    float   velocidade;
+    bool    ativa;
+} PlasmaBall;
+
+typedef struct Pilar
+{
+    Rectangle rect;
+} Pilar;
+
+// =========================================
+// FUNCOES AUXILIARES
+// =========================================
+
+void CriarExplosao(Particula p[], Vector2 o, Color c1, Color c2, int n)
+{
+    int k = 0;
+    for (int i = 0; i < MAX_PARTICULAS && k < n; i++)
+    {
+        if (p[i].ativa) continue;
+        p[i].ativa        = true;
+        p[i].posicao      = o;
+        p[i].velocidade.x = GetRandomValue(-300, 300) / 100.0f;
+        p[i].velocidade.y = GetRandomValue(-300, 300) / 100.0f;
+        p[i].tamanho      = GetRandomValue(3, 9);
+        p[i].tempoVida    = GetRandomValue(40, 80) / 100.0f;
+        p[i].tempoVidaMax = p[i].tempoVida;
+        p[i].cor          = (k % 2 == 0) ? c1 : c2;
+        k++;
+    }
+}
+
+void CriarTrilha(Particula p[], Vector2 o)
+{
+    for (int i = 0; i < MAX_PARTICULAS; i++)
+    {
+        if (p[i].ativa) continue;
+        p[i].ativa        = true;
+        p[i].posicao      = o;
+        p[i].velocidade.x = GetRandomValue(-60, 60) / 100.0f;
+        p[i].velocidade.y = GetRandomValue(-60, 60) / 100.0f;
+        p[i].tamanho      = GetRandomValue(2, 5);
+        p[i].tempoVida    = 0.18f;
+        p[i].tempoVidaMax = 0.18f;
+        p[i].cor          = (Color){80, 220, 255, 255};
+        break;
+    }
+}
+
+bool ColideComPilar(Rectangle r, Pilar pilares[], int total)
+{
+    for (int i = 0; i < total; i++)
+        if (CheckCollisionRecs(r, pilares[i].rect)) return true;
+    return false;
+}
+
+Vector2 ResolverColisaoPilar(Vector2 pos, float raio, Pilar pilares[], int total)
+{
+    for (int i = 0; i < total; i++)
+    {
+        Rectangle r  = pilares[i].rect;
+        float cx     = r.x + r.width  / 2.0f;
+        float cy     = r.y + r.height / 2.0f;
+        float dx     = pos.x - cx;
+        float dy     = pos.y - cy;
+        float sobreX = (r.width  / 2.0f + raio) - fabsf(dx);
+        float sobreY = (r.height / 2.0f + raio) - fabsf(dy);
+
+        if (sobreX > 0 && sobreY > 0)
+        {
+            if (sobreX < sobreY)
+                pos.x += (dx > 0) ? sobreX : -sobreX;
+            else
+                pos.y += (dy > 0) ? sobreY : -sobreY;
+        }
+    }
+    return pos;
+}
+
+// Conta quantos fantasmas ainda estao vivos na onda
+// FIX: substitui a lambda C++ por uma funcao auxiliar em C puro
+int ContarVivos(bool fantasmaAtivo[], int total)
+{
+    int vivos = 0;
+    for (int i = 0; i < total; i++)
+        if (fantasmaAtivo[i]) vivos++;
+    return vivos;
+}
+
+// =========================================
+// FUNCAO DE RESET COMPLETO
+// FIX: removido parametro `chefao_ptr` que era passado por valor e nunca usado
+// =========================================
+
+void ResetarJogo(
+    Vector2    *jogador,
+    int        *pontuacao,
+    int        *vida,
+    float      *tempo,
+    int        *fantasmasCpt,
+    int        *plasmaCarga,
+    bool       *plasmaCarregado,
+    PlasmaBall *plasma,
+    bool       *chefaoAtivo,
+    int        *chefaoVida,
+    float      *chefaoTimer,
+    float      *chefaoBob,
+    float      *velChefao,
+    int        *quantidadeChefoes,
+    bool        chefaoExtraAtivo[],
+    int         chefaoExtraVida[],
+    float       chefaoExtraTimer[],
+    Vector2     fantasmas[],
+    bool        fantasmaAtivo[],
+    int        *numFantasmasOnda,
+    Particula   particulas[],
+    int        *onda,
+    float      *portalTimer
+)
+{
+    *jogador           = (Vector2){400, 260};
+    *pontuacao         = 0;
+    *vida              = 100;
+    *tempo             = 0.0f;
+    *fantasmasCpt      = 0;
+    *plasmaCarga       = 0;
+    *plasmaCarregado   = false;
+    plasma->ativa      = false;
+    *chefaoAtivo       = true;
+    *chefaoVida        = CHEFAO_VIDA_MAX;
+    *chefaoTimer       = 0.0f;
+    *chefaoBob         = 0.0f;
+    *velChefao         = 1.2f;
+    *quantidadeChefoes = 0;
+    *onda              = 1;
+    *numFantasmasOnda  = MAX_FANTASMAS_BASE;
+    *portalTimer       = 0.0f;
+
+    for (int i = 0; i < MAX_CHEFOES; i++)
+    {
+        chefaoExtraAtivo[i] = false;
+        chefaoExtraVida[i]  = CHEFAO_VIDA_MAX;
+        chefaoExtraTimer[i] = 0.0f;
+    }
+    for (int i = 0; i < MAX_FANTASMAS; i++)
+    {
+        fantasmaAtivo[i] = (i < MAX_FANTASMAS_BASE);
+        fantasmas[i]     = (Vector2){100.0f + (i % 5) * 130.0f, 150.0f};
+    }
+    for (int i = 0; i < MAX_PARTICULAS; i++)
+        particulas[i].ativa = false;
+}
+
+// =========================================
+// MAIN
+// =========================================
+
+int main(void)
+{
+    InitWindow(LARGURA_TELA, ALTURA_TELA, "Cacada Fantasma");
+    SetTargetFPS(60);
+
+    GameState estadoAtual = MENU;
+
+    // ---- Jogador ----
+    Vector2 jogador   = { 400, 260 };
+    float velocidade  = 4.0f;
+
+    // ---- Ondas ----
+    int onda             = 1;
+    int numFantasmasOnda = MAX_FANTASMAS_BASE;
+
+    // ---- Mini fantasmas ----
+    float   velocidadeFantasma = 2.2f;
+    Vector2 fantasmas[MAX_FANTASMAS];
+    bool    fantasmaAtivo[MAX_FANTASMAS];
+
+    for (int i = 0; i < MAX_FANTASMAS; i++)
+    {
+        fantasmaAtivo[i] = (i < numFantasmasOnda);
+        fantasmas[i]     = (Vector2){100.0f + (i % 5) * 130.0f, 150.0f};
+    }
+
+    // ---- Fantasma isca (dourado) ----
+    Vector2 fantasmaIsca      = { 600, 300 };
+    bool    fantasmaIscaAtivo = false;
+    float   fantasmaIscaTimer = 8.0f;
+
+    // ---- Chefao principal ----
+    Vector2 chefao      = { 100, 420 };
+    bool    chefaoAtivo = true;
+    int     chefaoVida  = CHEFAO_VIDA_MAX;
+    float   velChefao   = 1.2f;
+    float   chefaoTimer = 0.0f;
+    float   chefaoBob   = 0.0f;
+
+    // ---- Chefoes extras ----
+    Vector2 chefoes[MAX_CHEFOES];
+    bool    chefaoExtraAtivo[MAX_CHEFOES];
+    int     chefaoExtraVida[MAX_CHEFOES];
+    float   chefaoExtraTimer[MAX_CHEFOES];
+    int     quantidadeChefoes = 0;
+
+    for (int i = 0; i < MAX_CHEFOES; i++)
+    {
+        chefaoExtraAtivo[i] = false;
+        chefaoExtraVida[i]  = CHEFAO_VIDA_MAX;
+        chefaoExtraTimer[i] = 0.0f;
+    }
+
+    // ---- Plasma ----
+    int        plasmaCarga     = 0;
+    bool       plasmaCarregado = false;
+    PlasmaBall plasma          = { {0,0}, {0,0}, 7.0f, false };
+
+    // ---- Particulas ----
+    Particula particulas[MAX_PARTICULAS] = { 0 };
+
+    // ---- Pilares fixos ----
+    Pilar pilares[MAX_PILARES] =
+    {
+        { { 160, 130, 30, 90 } },
+        { { 610, 130, 30, 90 } },
+        { { 350, 200, 30, 80 } },
+        { { 100, 350, 90, 25 } },
+        { { 610, 350, 90, 25 } },
+        { { 350, 390, 80, 25 } },
+    };
+
+    // ---- Portais ----
+    Vector2 portalA     = { 60,  280 };
+    Vector2 portalB     = { 720, 280 };
+    float   portalTimer = 0.0f;
+    float   portalBob   = 0.0f;
+
+    // ---- HUD ----
+    int   pontuacao    = 0;
+    int   vida         = 100;
+    float tempo        = 0.0f;
+    int   fantasmasCpt = 0;
+
+    // =========================================
+    // LOOP PRINCIPAL
+    // =========================================
+
+    while (!WindowShouldClose())
+    {
+        float dt = GetFrameTime();
+
+        // =====================================
+        // UPDATE
+        // =====================================
+
+        if (estadoAtual == MENU)
+        {
+            if (IsKeyPressed(KEY_ENTER))  estadoAtual = GAME;
+            if (IsKeyPressed(KEY_I))      estadoAtual = INSTRUCTIONS;
+            if (IsKeyPressed(KEY_ESCAPE)) break;
+        }
+
+        else if (estadoAtual == INSTRUCTIONS)
+        {
+            if (IsKeyPressed(KEY_BACKSPACE)) estadoAtual = MENU;
+        }
+
+        else if (estadoAtual == PAUSE)
+        {
+            if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE))
+                estadoAtual = GAME;
+        }
+
+        else if (estadoAtual == WIN || estadoAtual == GAME_OVER)
+        {
+            if (IsKeyPressed(KEY_R))
+            {
+                // FIX: removido `chefao` do ResetarJogo (era passado por valor sem uso)
+                ResetarJogo(
+                    &jogador, &pontuacao, &vida, &tempo,
+                    &fantasmasCpt, &plasmaCarga, &plasmaCarregado,
+                    &plasma, &chefaoAtivo, &chefaoVida,
+                    &chefaoTimer, &chefaoBob, &velChefao,
+                    &quantidadeChefoes, chefaoExtraAtivo,
+                    chefaoExtraVida, chefaoExtraTimer,
+                    fantasmas, fantasmaAtivo, &numFantasmasOnda,
+                    particulas, &onda, &portalTimer
+                );
+                chefao            = (Vector2){100, 420};
+                fantasmaIscaAtivo = false;
+                fantasmaIscaTimer = 8.0f;
+                estadoAtual       = GAME;
+            }
+            if (IsKeyPressed(KEY_M))
+            {
+                ResetarJogo(
+                    &jogador, &pontuacao, &vida, &tempo,
+                    &fantasmasCpt, &plasmaCarga, &plasmaCarregado,
+                    &plasma, &chefaoAtivo, &chefaoVida,
+                    &chefaoTimer, &chefaoBob, &velChefao,
+                    &quantidadeChefoes, chefaoExtraAtivo,
+                    chefaoExtraVida, chefaoExtraTimer,
+                    fantasmas, fantasmaAtivo, &numFantasmasOnda,
+                    particulas, &onda, &portalTimer
+                );
+                chefao            = (Vector2){100, 420};
+                fantasmaIscaAtivo = false;
+                fantasmaIscaTimer = 8.0f;
+                estadoAtual       = MENU;
+            }
+        }
+
+        else if (estadoAtual == GAME)
+        {
+            tempo     += dt;
+            chefaoBob += dt * 3.0f;
+            portalBob += dt * 2.0f;
+            if (portalTimer > 0) portalTimer -= dt;
+
+            Vector2 centroJogador = { jogador.x + 20, jogador.y + 25 };
+
+            // -- PAUSE --
+            // FIX: removido `goto draw` — pause agora e tratado normalmente
+            // sem pular o bloco de desenho via goto, evitando comportamento
+            // indefinido e problemas de variaveis nao inicializadas
+            if (IsKeyPressed(KEY_P))
+            {
+                estadoAtual = PAUSE;
+            }
+            else
+            {
+                // --- Movimento do jogador ---
+                Vector2 novaPos = jogador;
+                if (IsKeyDown(KEY_RIGHT)) novaPos.x += velocidade;
+                if (IsKeyDown(KEY_LEFT))  novaPos.x -= velocidade;
+                if (IsKeyDown(KEY_UP))    novaPos.y -= velocidade;
+                if (IsKeyDown(KEY_DOWN))  novaPos.y += velocidade;
+
+                novaPos = ResolverColisaoPilar(novaPos, 20, pilares, MAX_PILARES);
+
+                if (novaPos.x < AREA_X_MIN) novaPos.x = AREA_X_MIN;
+                if (novaPos.x > AREA_X_MAX) novaPos.x = AREA_X_MAX;
+                if (novaPos.y < AREA_Y_MIN) novaPos.y = AREA_Y_MIN;
+                if (novaPos.y > AREA_Y_MAX) novaPos.y = AREA_Y_MAX;
+
+                jogador       = novaPos;
+                centroJogador = (Vector2){ jogador.x + 20, jogador.y + 25 };
+
+                // --- Portais ---
+                float dPA = sqrtf(
+                    (centroJogador.x - portalA.x) * (centroJogador.x - portalA.x) +
+                    (centroJogador.y - portalA.y) * (centroJogador.y - portalA.y));
+                float dPB = sqrtf(
+                    (centroJogador.x - portalB.x) * (centroJogador.x - portalB.x) +
+                    (centroJogador.y - portalB.y) * (centroJogador.y - portalB.y));
+
+                if (portalTimer <= 0.0f)
+                {
+                    if (dPA < RAIO_PORTAL)
+                    {
+                        jogador.x   = portalB.x - 20;
+                        jogador.y   = portalB.y - 25;
+                        portalTimer = COOLDOWN_PORTAL;
+                        CriarExplosao(particulas, portalB,
+                                      (Color){0,200,255,255}, (Color){180,0,255,255}, 20);
+                    }
+                    else if (dPB < RAIO_PORTAL)
+                    {
+                        jogador.x   = portalA.x - 20;
+                        jogador.y   = portalA.y - 25;
+                        portalTimer = COOLDOWN_PORTAL;
+                        CriarExplosao(particulas, portalA,
+                                      (Color){0,200,255,255}, (Color){180,0,255,255}, 20);
+                    }
+                }
+
+                // --- Disparo de plasma ---
+                if (IsKeyPressed(KEY_SPACE) && plasmaCarregado && !plasma.ativa)
+                {
+                    plasma.ativa   = true;
+                    plasma.posicao = centroJogador;
+
+                    float menorDist = 999999.0f;
+                    Vector2 alvo    = { centroJogador.x + 1.0f, centroJogador.y };
+
+                    if (chefaoAtivo)
+                    {
+                        float dx  = chefao.x - centroJogador.x;
+                        float dy  = chefao.y - centroJogador.y;
+                        menorDist = sqrtf(dx*dx + dy*dy);
+                        alvo      = chefao;
+                    }
+                    for (int i = 0; i < quantidadeChefoes; i++)
+                    {
+                        if (!chefaoExtraAtivo[i]) continue;
+                        float dx = chefoes[i].x - centroJogador.x;
+                        float dy = chefoes[i].y - centroJogador.y;
+                        float d  = sqrtf(dx*dx + dy*dy);
+                        if (d < menorDist) { menorDist = d; alvo = chefoes[i]; }
+                    }
+
+                    float dx = alvo.x - centroJogador.x;
+                    float dy = alvo.y - centroJogador.y;
+                    float d  = sqrtf(dx*dx + dy*dy);
+                    if (d < 0.5f) { dx = 1.0f; d = 1.0f; }
+                    plasma.direcao.x = dx / d;
+                    plasma.direcao.y = dy / d;
+                    plasmaCarregado  = false;
+                    plasmaCarga      = 0;
+                }
+
+                // --- Atualiza plasma ---
+                if (plasma.ativa)
+                {
+                    plasma.posicao.x += plasma.direcao.x * plasma.velocidade;
+                    plasma.posicao.y += plasma.direcao.y * plasma.velocidade;
+                    CriarTrilha(particulas, plasma.posicao);
+
+                    Rectangle rPlasma = {
+                        plasma.posicao.x - 10,
+                        plasma.posicao.y - 10,
+                        20, 20
+                    };
+                    if (ColideComPilar(rPlasma, pilares, MAX_PILARES))
+                    {
+                        CriarExplosao(particulas, plasma.posicao,
+                                      (Color){80,220,255,255}, WHITE, 12);
+                        plasma.ativa = false;
+                    }
+
+                    if (plasma.posicao.x < 0 || plasma.posicao.x > LARGURA_TELA ||
+                        plasma.posicao.y < 0 || plasma.posicao.y > ALTURA_TELA)
+                        plasma.ativa = false;
+
+                    if (plasma.ativa && chefaoAtivo)
+                    {
+                        float dx = plasma.posicao.x - chefao.x;
+                        float dy = plasma.posicao.y - chefao.y;
+                        if (sqrtf(dx*dx + dy*dy) < 28)
+                        {
+                            chefaoVida--;
+                            CriarExplosao(particulas, chefao,
+                                          (Color){255,80,0,255},
+                                          (Color){80,200,255,255}, 40);
+                            plasma.ativa = false;
+                            if (chefaoVida <= 0)
+                            {
+                                chefaoAtivo = false;
+                                CriarExplosao(particulas, chefao,
+                                              (Color){255,200,0,255},
+                                              (Color){255,80,0,255}, 80);
+                            }
+                        }
+                    }
+
+                    for (int i = 0; i < quantidadeChefoes; i++)
+                    {
+                        if (!chefaoExtraAtivo[i] || !plasma.ativa) continue;
+                        float dx = plasma.posicao.x - chefoes[i].x;
+                        float dy = plasma.posicao.y - chefoes[i].y;
+                        if (sqrtf(dx*dx + dy*dy) < 22)
+                        {
+                            chefaoExtraVida[i]--;
+                            CriarExplosao(particulas, chefoes[i],
+                                          (Color){255,80,0,255},
+                                          (Color){80,200,255,255}, 30);
+                            plasma.ativa = false;
+                            if (chefaoExtraVida[i] <= 0)
+                            {
+                                chefaoExtraAtivo[i] = false;
+                                CriarExplosao(particulas, chefoes[i],
+                                              (Color){255,200,0,255},
+                                              (Color){255,80,0,255}, 60);
+                            }
+                        }
+                    }
+                }
+
+                // --- Atualiza particulas ---
+                for (int i = 0; i < MAX_PARTICULAS; i++)
+                {
+                    if (!particulas[i].ativa) continue;
+                    particulas[i].posicao.x += particulas[i].velocidade.x * 100 * dt;
+                    particulas[i].posicao.y += particulas[i].velocidade.y * 100 * dt;
+                    particulas[i].tempoVida -= dt;
+                    particulas[i].tamanho   -= dt * 4;
+                    if (particulas[i].tempoVida <= 0 || particulas[i].tamanho <= 0)
+                        particulas[i].ativa = false;
+                }
+
+                // --- Mini fantasmas: fogem ---
+                for (int i = 0; i < numFantasmasOnda; i++)
+                {
+                    if (!fantasmaAtivo[i]) continue;
+
+                    float dx   = fantasmas[i].x - centroJogador.x;
+                    float dy   = fantasmas[i].y - centroJogador.y;
+                    float dist = sqrtf(dx*dx + dy*dy);
+
+                    if (dist < RAIO_FUGA && dist > 0.5f)
+                    {
+                        Vector2 novaF = {
+                            fantasmas[i].x + (dx / dist) * velocidadeFantasma,
+                            fantasmas[i].y + (dy / dist) * velocidadeFantasma
+                        };
+                        novaF        = ResolverColisaoPilar(novaF, 12, pilares, MAX_PILARES);
+                        fantasmas[i] = novaF;
+                    }
+
+                    if (fantasmas[i].x < 15)                fantasmas[i].x = 15;
+                    if (fantasmas[i].x > LARGURA_TELA - 15) fantasmas[i].x = LARGURA_TELA - 15;
+                    if (fantasmas[i].y < AREA_Y_MIN + 15)   fantasmas[i].y = AREA_Y_MIN + 15;
+                    if (fantasmas[i].y > ALTURA_TELA - 15)  fantasmas[i].y = ALTURA_TELA - 15;
+                }
+
+                // --- Fantasma isca (onda >= 2) ---
+                if (onda >= 2)
+                {
+                    if (!fantasmaIscaAtivo)
+                    {
+                        fantasmaIscaTimer -= dt;
+                        if (fantasmaIscaTimer <= 0.0f)
+                        {
+                            fantasmaIscaAtivo = true;
+                            fantasmaIsca      = (Vector2){
+                                (float)GetRandomValue(80, 700),
+                                (float)GetRandomValue(AREA_Y_MIN + 30, ALTURA_TELA - 50)
+                            };
+                            fantasmaIscaTimer = 10.0f + (float)GetRandomValue(0, 8);
+                        }
+                    }
+                    else
+                    {
+                        float dx      = fantasmaIsca.x - centroJogador.x;
+                        float dy      = fantasmaIsca.y - centroJogador.y;
+                        float dist    = sqrtf(dx*dx + dy*dy);
+                        float velIsca = velocidadeFantasma * 3.2f;
+
+                        if (dist < RAIO_FUGA * 1.5f && dist > 0.5f)
+                        {
+                            Vector2 novaI = {
+                                fantasmaIsca.x + (dx / dist) * velIsca,
+                                fantasmaIsca.y + (dy / dist) * velIsca
+                            };
+                            novaI        = ResolverColisaoPilar(novaI, 12, pilares, MAX_PILARES);
+                            fantasmaIsca = novaI;
+                        }
+
+                        if (fantasmaIsca.x < 15)                fantasmaIsca.x = 15;
+                        if (fantasmaIsca.x > LARGURA_TELA - 15) fantasmaIsca.x = LARGURA_TELA - 15;
+                        if (fantasmaIsca.y < AREA_Y_MIN + 15)   fantasmaIsca.y = AREA_Y_MIN + 15;
+                        if (fantasmaIsca.y > ALTURA_TELA - 15)  fantasmaIsca.y = ALTURA_TELA - 15;
+
+                        Rectangle rJ = { jogador.x, jogador.y, 40, 40 };
+                        Rectangle rI = { fantasmaIsca.x - 12, fantasmaIsca.y - 12, 24, 24 };
+
+                        if (CheckCollisionRecs(rJ, rI))
+                        {
+                            fantasmaIscaAtivo = false;
+                            fantasmaIscaTimer = 10.0f + (float)GetRandomValue(0, 8);
+                            pontuacao        += 50;
+                            fantasmasCpt     += 1;
+                            if (!plasmaCarregado)
+                            {
+                                plasmaCarga += 3;
+                                if (plasmaCarga >= PLASMA_CARGA_MAX) plasmaCarregado = true;
+                            }
+                            CriarExplosao(particulas, fantasmaIsca, GOLD, YELLOW, 25);
+                        }
+                    }
+                }
+
+                // --- Chefao principal persegue ---
+                velChefao = 1.2f + (float)pontuacao * 0.003f;
+
+                if (chefaoAtivo)
+                {
+                    Vector2 novaC = chefao;
+                    if (chefao.x < centroJogador.x) novaC.x += velChefao;
+                    if (chefao.x > centroJogador.x) novaC.x -= velChefao;
+                    if (chefao.y < centroJogador.y) novaC.y += velChefao;
+                    if (chefao.y > centroJogador.y) novaC.y -= velChefao;
+
+                    novaC = ResolverColisaoPilar(novaC, 26, pilares, MAX_PILARES);
+
+                    if (novaC.x < 25)                novaC.x = 25;
+                    if (novaC.x > LARGURA_TELA - 25) novaC.x = LARGURA_TELA - 25;
+                    if (novaC.y < AREA_Y_MIN + 25)   novaC.y = AREA_Y_MIN + 25;
+                    if (novaC.y > ALTURA_TELA - 25)  novaC.y = ALTURA_TELA - 25;
+                    chefao = novaC;
+
+                    chefaoTimer -= dt;
+                    Rectangle rC = { chefao.x - 25, chefao.y - 25, 50, 50 };
+                    Rectangle rJ = { jogador.x, jogador.y, 40, 40 };
+
+                    if (CheckCollisionRecs(rJ, rC) && chefaoTimer <= 0.0f)
+                    {
+                        vida       -= 10;
+                        chefaoTimer = 0.5f;
+                        if (vida <= 0) { vida = 0; estadoAtual = GAME_OVER; }
+                    }
+                }
+
+                // --- Chefoes extras ---
+                for (int i = 0; i < quantidadeChefoes; i++)
+                {
+                    if (!chefaoExtraAtivo[i]) continue;
+                    float velE  = velChefao * 0.85f;
+                    Vector2 novaE = chefoes[i];
+
+                    if (chefoes[i].x < centroJogador.x) novaE.x += velE;
+                    if (chefoes[i].x > centroJogador.x) novaE.x -= velE;
+                    if (chefoes[i].y < centroJogador.y) novaE.y += velE;
+                    if (chefoes[i].y > centroJogador.y) novaE.y -= velE;
+
+                    novaE      = ResolverColisaoPilar(novaE, 21, pilares, MAX_PILARES);
+                    chefoes[i] = novaE;
+
+                    chefaoExtraTimer[i] -= dt;
+                    Rectangle rE = { chefoes[i].x - 20, chefoes[i].y - 20, 40, 40 };
+                    Rectangle rJ = { jogador.x, jogador.y, 40, 40 };
+
+                    if (CheckCollisionRecs(rJ, rE) && chefaoExtraTimer[i] <= 0.0f)
+                    {
+                        vida -= 8;
+                        chefaoExtraTimer[i] = 0.5f;
+                        if (vida <= 0) { vida = 0; estadoAtual = GAME_OVER; }
+                    }
+                }
+
+                // --- Colisao jogador x mini fantasma ---
+                for (int i = 0; i < numFantasmasOnda; i++)
+                {
+                    if (!fantasmaAtivo[i]) continue;
+                    Rectangle rJ = { jogador.x, jogador.y, 40, 40 };
+                    Rectangle rF = { fantasmas[i].x - 12, fantasmas[i].y - 12, 24, 24 };
+
+                    if (CheckCollisionRecs(rJ, rF))
+                    {
+                        fantasmaAtivo[i] = false;
+                        pontuacao       += 10;
+                        fantasmasCpt    += 1;
+
+                        if (!plasmaCarregado)
+                        {
+                            plasmaCarga++;
+                            if (plasmaCarga >= PLASMA_CARGA_MAX) plasmaCarregado = true;
+                        }
+
+                        if (pontuacao % 100 == 0 && quantidadeChefoes < MAX_CHEFOES)
+                        {
+                            float sx = (centroJogador.x < LARGURA_TELA / 2)
+                                       ? (float)GetRandomValue(500, 750)
+                                       : (float)GetRandomValue(50, 300);
+                            float sy = (centroJogador.y < ALTURA_TELA / 2)
+                                       ? (float)GetRandomValue(350, 470)
+                                       : (float)GetRandomValue(AREA_Y_MIN + 30, 200);
+
+                            chefoes[quantidadeChefoes]           = (Vector2){ sx, sy };
+                            chefaoExtraAtivo[quantidadeChefoes]  = true;
+                            chefaoExtraVida[quantidadeChefoes]   = CHEFAO_VIDA_MAX;
+                            chefaoExtraTimer[quantidadeChefoes]  = 0.0f;
+                            quantidadeChefoes++;
+                        }
+                    }
+                }
+
+                // --- Nova onda ---
+                bool todosMortos = true;
+                for (int i = 0; i < numFantasmasOnda; i++)
+                    if (fantasmaAtivo[i]) { todosMortos = false; break; }
+
+                if (todosMortos)
+                {
+                    onda++;
+                    numFantasmasOnda = MAX_FANTASMAS_BASE + (onda - 1) * 2;
+                    if (numFantasmasOnda > MAX_FANTASMAS) numFantasmasOnda = MAX_FANTASMAS;
+
+                    velocidadeFantasma = 2.2f + (float)(onda - 1) * 0.15f;
+
+                    for (int i = 0; i < numFantasmasOnda; i++)
+                    {
+                        fantasmaAtivo[i] = true;
+                        do {
+                            fantasmas[i].x = (float)GetRandomValue(50, 750);
+                            fantasmas[i].y = (float)GetRandomValue(AREA_Y_MIN + 30, ALTURA_TELA - 50);
+                        } while (
+                            fabsf(fantasmas[i].x - centroJogador.x) < 100 &&
+                            fabsf(fantasmas[i].y - centroJogador.y) < 100
+                        );
+                    }
+                }
+
+                // --- WIN ---
+                if (!chefaoAtivo && quantidadeChefoes > 0)
+                {
+                    bool todosExtrasMortos = true;
+                    for (int i = 0; i < quantidadeChefoes; i++)
+                        if (chefaoExtraAtivo[i]) { todosExtrasMortos = false; break; }
+                    if (todosExtrasMortos) estadoAtual = WIN;
+                }
+
+                if (IsKeyPressed(KEY_G)) estadoAtual = GAME_OVER;
+
+            } // fim do else (nao pausado)
+
+        } // fim do GAME update
+
+        // =====================================
+        // DRAW
+        // =====================================
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+
+        // ----- MENU -----
+        if (estadoAtual == MENU)
+        {
+            ClearBackground((Color){15, 10, 30, 255});
+            DrawText("CACADA FANTASMA",       130, 80,  52, (Color){200, 80, 255, 255});
+            DrawText("ENTER  ->  Jogar",       240, 200, 24, WHITE);
+            DrawText("I      ->  Instrucoes",  240, 240, 24, LIGHTGRAY);
+            DrawText("ESC    ->  Sair",        240, 280, 24, GRAY);
+        }
+
+        // ----- INSTRUCOES -----
+        else if (estadoAtual == INSTRUCTIONS)
+        {
+            ClearBackground((Color){15, 10, 30, 255});
+            DrawText("INSTRUCOES", 260, 35, 36, (Color){200, 80, 255, 255});
+
+            DrawText("Setas          ->  mover",                          80, 100, 19, WHITE);
+            DrawText("Toque nos fantasmas para captura-los",              80, 126, 19, WHITE);
+            DrawText("Fantasma DOURADO vale 50pts e foge muito rapido!",  80, 152, 19, GOLD);
+            DrawText("P              ->  pausar",                         80, 178, 19, LIGHTGRAY);
+            DrawText("O CHEFAO te persegue e da dano",                   80, 204, 19, RED);
+            DrawText("A cada 100 pontos surge um novo CHEFAO",           80, 230, 19, ORANGE);
+            DrawText("Capture 20 fantasmas para carregar o PLASMA",      80, 256, 19, (Color){80, 220, 255, 255});
+            DrawText("ESPACO -> dispara plasma no chefao mais proximo",   80, 282, 19, (Color){80, 220, 255, 255});
+            DrawText("2 acertos de plasma = CHEFAO DESTRUIDO",           80, 308, 19, YELLOW);
+            DrawText("Destrua TODOS os chefoes para VENCER!",            80, 334, 19, GREEN);
+            DrawText("Pilares bloqueiam passagem (esconda-se!)",          80, 360, 19, (Color){180, 140, 80, 255});
+            DrawText("Portais AZUIS teletransportam para o outro lado",  80, 386, 19, (Color){0, 200, 255, 255});
+            DrawText("Ondas crescem: onda 1=5, onda 2=7, onda 3=9...",  80, 412, 19, (Color){180, 130, 255, 255});
+            DrawText("BACKSPACE  ->  voltar",                             80, 450, 19, LIGHTGRAY);
+        }
+
+        // ----- PAUSE -----
+        else if (estadoAtual == PAUSE)
+        {
+            DrawRectangle(0, ALTURA_HUD, LARGURA_TELA, ALTURA_TELA - ALTURA_HUD,
+                          (Color){245, 240, 255, 255});
+            DrawRectangle(0, 0, LARGURA_TELA, ALTURA_TELA, (Color){0, 0, 0, 160});
+
+            DrawText("PAUSADO",            290, 150, 52, (Color){200, 80, 255, 255});
+            DrawText("P  ->  Continuar",   285, 250, 26, WHITE);
+            DrawText(TextFormat("Onda: %i   Pontos: %i   Vida: %i%%",
+                     onda, pontuacao, vida),
+                     200, 350, 20, (Color){180, 130, 255, 255});
+        }
+
+        // ----- JOGO -----
+        else if (estadoAtual == GAME)
+        {
+            // == HUD ==
+            DrawRectangle(0, 0, LARGURA_TELA, ALTURA_HUD, (Color){20, 15, 40, 255});
+            DrawLine(0, ALTURA_HUD, LARGURA_TELA, ALTURA_HUD, (Color){150, 80, 220, 200});
+
+            DrawText("PONTOS", 10, 8, 14, (Color){180, 130, 255, 255});
+            DrawText(TextFormat("%05i", pontuacao), 10, 26, 24, WHITE);
+
+            DrawText("ONDA", 120, 8, 14, (Color){180, 130, 255, 255});
+            DrawText(TextFormat("%i", onda), 120, 26, 28, (Color){255, 200, 80, 255});
+
+            DrawText("VIDA", 185, 8, 14, (Color){180, 130, 255, 255});
+            DrawRectangle(185, 28, 130, 18, (Color){80, 20, 20, 255});
+            Color corVida = GREEN;
+            if (vida < 60) corVida = YELLOW;
+            if (vida < 30) corVida = RED;
+            DrawRectangle(185, 28, (int)(vida * 1.3f), 18, corVida);
+            DrawRectangleLines(185, 28, 130, 18, (Color){220, 100, 255, 200});
+            DrawText(TextFormat("%d%%", vida), 320, 31, 14, WHITE);
+
+            DrawText("PLASMA", 360, 8, 14, (Color){80, 220, 255, 255});
+            DrawRectangle(360, 28, 140, 18, (Color){10, 40, 60, 255});
+            if (plasmaCarregado)
+            {
+                // FIX: precedencia corrigida com parenteses extras no cast + modulo
+                Color cp = (((int)(tempo * 8)) % 2 == 0)
+                           ? (Color){0, 220, 255, 255}
+                           : (Color){150, 240, 255, 255};
+                DrawRectangle(360, 28, 140, 18, cp);
+                DrawText("PRONTO!", 368, 31, 14, (Color){10, 10, 40, 255});
+            }
+            else
+            {
+                DrawRectangle(360, 28, (int)(140.0f * plasmaCarga / PLASMA_CARGA_MAX), 18,
+                              (Color){40, 160, 220, 255});
+                DrawText(TextFormat("%i/%i", plasmaCarga, PLASMA_CARGA_MAX), 368, 31, 14, WHITE);
+            }
+            DrawRectangleLines(360, 28, 140, 18, (Color){80, 220, 255, 180});
+
+            DrawText("CAPTURAS", 520, 8, 14, (Color){180, 130, 255, 255});
+            DrawText(TextFormat("%i", fantasmasCpt), 520, 26, 24, WHITE);
+
+            DrawText("CHEFOES", 620, 8, 14, (Color){180, 130, 255, 255});
+            int chefVivos = (chefaoAtivo ? 1 : 0);
+            for (int i = 0; i < quantidadeChefoes; i++)
+                if (chefaoExtraAtivo[i]) chefVivos++;
+            DrawText(TextFormat("%i", chefVivos), 620, 26, 24,
+                     chefVivos > 0 ? ORANGE : GREEN);
+
+            DrawText("TEMPO", 700, 8, 14, (Color){180, 130, 255, 255});
+            DrawText(TextFormat("%.0fs", tempo), 700, 26, 20, WHITE);
+            DrawText("P=pause", 755, 8, 12, (Color){120, 100, 160, 255});
+
+            // == Area de jogo ==
+            DrawRectangle(0, ALTURA_HUD, LARGURA_TELA,
+                          ALTURA_TELA - ALTURA_HUD, (Color){245, 240, 255, 255});
+
+            // -- Pilares --
+            for (int i = 0; i < MAX_PILARES; i++)
+            {
+                Rectangle r = pilares[i].rect;
+                DrawRectangle((int)r.x + 3, (int)r.y + 3, (int)r.width, (int)r.height,
+                              (Color){0, 0, 0, 60});
+                DrawRectangleRec(r, (Color){100, 80, 50, 255});
+                DrawRectangleLinesEx(r, 2, (Color){60, 45, 25, 255});
+                DrawLine((int)r.x + 8, (int)r.y + 4,
+                         (int)r.x + 8, (int)(r.y + r.height - 4),
+                         (Color){80, 60, 35, 120});
+                DrawLine((int)(r.x + r.width - 8), (int)r.y + 4,
+                         (int)(r.x + r.width - 8), (int)(r.y + r.height - 4),
+                         (Color){80, 60, 35, 120});
+            }
+
+            // -- Portais --
+            {
+                float pb   = sinf(portalBob);
+                int raioA  = (int)(RAIO_PORTAL + pb * 3);
+                int raioB  = (int)(RAIO_PORTAL - pb * 3);
+
+                DrawCircle((int)portalA.x, (int)portalA.y, (float)(raioA + 6), (Color){0, 180, 255, 40});
+                DrawCircle((int)portalA.x, (int)portalA.y, (float)raioA,       (Color){0, 200, 255, 200});
+                DrawCircle((int)portalA.x, (int)portalA.y, (float)(raioA - 6), (Color){180, 0, 255, 180});
+                DrawCircleLines((int)portalA.x, (int)portalA.y, (float)raioA, WHITE);
+                DrawText("A", (int)portalA.x - 5, (int)portalA.y - 8, 16,
+                         portalTimer > 0 ? GRAY : WHITE);
+
+                DrawCircle((int)portalB.x, (int)portalB.y, (float)(raioB + 6), (Color){0, 180, 255, 40});
+                DrawCircle((int)portalB.x, (int)portalB.y, (float)raioB,       (Color){0, 200, 255, 200});
+                DrawCircle((int)portalB.x, (int)portalB.y, (float)(raioB - 6), (Color){180, 0, 255, 180});
+                DrawCircleLines((int)portalB.x, (int)portalB.y, (float)raioB, WHITE);
+                DrawText("B", (int)portalB.x - 5, (int)portalB.y - 8, 16,
+                         portalTimer > 0 ? GRAY : WHITE);
+            }
+
+            // -- Particulas --
+            for (int i = 0; i < MAX_PARTICULAS; i++)
+            {
+                if (!particulas[i].ativa) continue;
+                float ratio = particulas[i].tempoVida / particulas[i].tempoVidaMax;
+                Color c     = particulas[i].cor;
+                c.a         = (unsigned char)(ratio * 255);
+                DrawCircleV(particulas[i].posicao, particulas[i].tamanho, c);
+            }
+
+            // -- Bola de plasma --
+            if (plasma.ativa)
+            {
+                DrawCircle((int)plasma.posicao.x, (int)plasma.posicao.y, 16, (Color){80, 220, 255, 80});
+                DrawCircle((int)plasma.posicao.x, (int)plasma.posicao.y, 10, (Color){0, 200, 255, 255});
+                DrawCircle((int)plasma.posicao.x, (int)plasma.posicao.y,  5, WHITE);
+            }
+
+            // -- Mini fantasmas --
+            for (int i = 0; i < numFantasmasOnda; i++)
+            {
+                if (!fantasmaAtivo[i]) continue;
+                int fx = (int)fantasmas[i].x;
+                int fy = (int)fantasmas[i].y;
+                DrawCircle(fx, fy, 10, (Color){190, 140, 255, 230});
+                DrawRectangle(fx - 10, fy, 20, 9, (Color){190, 140, 255, 230});
+                DrawCircle(fx - 4, fy - 2, 3, WHITE);
+                DrawCircle(fx + 4, fy - 2, 3, WHITE);
+                DrawCircle(fx - 4, fy - 2, 1, (Color){60, 0, 100, 255});
+                DrawCircle(fx + 4, fy - 2, 1, (Color){60, 0, 100, 255});
+                DrawCircle(fx, fy + 4, 2, (Color){60, 0, 100, 200});
+            }
+
+            // -- Fantasma isca (dourado) --
+            if (fantasmaIscaAtivo)
+            {
+                int fx = (int)fantasmaIsca.x;
+                int fy = (int)fantasmaIsca.y;
+                DrawCircle(fx, fy, 14, (Color){255, 215, 0, 60});
+                DrawCircle(fx, fy, 10, GOLD);
+                DrawRectangle(fx - 10, fy, 20, 9, GOLD);
+                DrawTriangle(
+                    (Vector2){(float)(fx-8),  (float)(fy-10)},
+                    (Vector2){(float)(fx-11), (float)(fy-17)},
+                    (Vector2){(float)(fx-4),  (float)(fy-10)},
+                    (Color){255, 180, 0, 255});
+                DrawTriangle(
+                    (Vector2){(float)(fx-2), (float)(fy-11)},
+                    (Vector2){(float)fx,     (float)(fy-19)},
+                    (Vector2){(float)(fx+2), (float)(fy-11)},
+                    (Color){255, 200, 0, 255});
+                DrawTriangle(
+                    (Vector2){(float)(fx+4),  (float)(fy-10)},
+                    (Vector2){(float)(fx+11), (float)(fy-17)},
+                    (Vector2){(float)(fx+8),  (float)(fy-10)},
+                    (Color){255, 180, 0, 255});
+                DrawLine(fx - 6, fy - 4, fx - 2, fy - 2, (Color){80, 40, 0, 255});
+                DrawLine(fx + 2, fy - 2, fx + 6, fy - 4, (Color){80, 40, 0, 255});
+                DrawText("+50", fx - 10, fy - 30, 14, YELLOW);
+            }
+
+            // -- Chefao principal --
+            if (chefaoAtivo)
+            {
+                int cx = (int)chefao.x;
+                int cy = (int)chefao.y + (int)(sinf(chefaoBob) * 4);
+
+                DrawCircle(cx, cy, 32, (Color){80, 0, 120, 80});
+                DrawCircle(cx, cy, 25, (Color){60, 0, 100, 255});
+                DrawRectangle(cx - 25, cy, 50, 20, (Color){60, 0, 100, 255});
+                DrawTriangle(
+                    (Vector2){(float)(cx-20), (float)(cy-24)},
+                    (Vector2){(float)(cx-26), (float)(cy-38)},
+                    (Vector2){(float)(cx-12), (float)(cy-24)},
+                    (Color){255, 180, 0, 255});
+                DrawTriangle(
+                    (Vector2){(float)(cx-4), (float)(cy-25)},
+                    (Vector2){(float)cx,     (float)(cy-42)},
+                    (Vector2){(float)(cx+4), (float)(cy-25)},
+                    (Color){255, 200, 0, 255});
+                DrawTriangle(
+                    (Vector2){(float)(cx+12), (float)(cy-24)},
+                    (Vector2){(float)(cx+26), (float)(cy-38)},
+                    (Vector2){(float)(cx+20), (float)(cy-24)},
+                    (Color){255, 180, 0, 255});
+                DrawCircle(cx - 9, cy - 6, 6, (Color){255,  60,  60, 255});
+                DrawCircle(cx + 9, cy - 6, 6, (Color){255,  60,  60, 255});
+                DrawCircle(cx - 9, cy - 6, 3, (Color){255, 180,   0, 255});
+                DrawCircle(cx + 9, cy - 6, 3, (Color){255, 180,   0, 255});
+                DrawLine(cx - 10, cy + 8, cx - 4, cy + 4, WHITE);
+                DrawLine(cx -  4, cy + 4, cx + 4, cy + 4, WHITE);
+                DrawLine(cx +  4, cy + 4, cx +10, cy + 8, WHITE);
+                DrawRectangle(cx - 25, cy - 60, 50, 8, (Color){80, 20, 20, 255});
+                DrawRectangle(cx - 25, cy - 60, 25 * chefaoVida, 8, RED);
+                DrawRectangleLines(cx - 25, cy - 60, 50, 8, WHITE);
+                DrawText("CHEFAO", cx - 22, cy - 75, 14, (Color){255, 200, 0, 255});
+            }
+
+            // -- Chefoes extras --
+            for (int i = 0; i < quantidadeChefoes; i++)
+            {
+                if (!chefaoExtraAtivo[i]) continue;
+                int cx = (int)chefoes[i].x;
+                int cy = (int)chefoes[i].y + (int)(sinf(chefaoBob + (float)i * 1.2f) * 3);
+
+                DrawCircle(cx, cy, 25, (Color){100, 0,  80,  70});
+                DrawCircle(cx, cy, 20, (Color){ 80, 0, 130, 255});
+                DrawRectangle(cx - 20, cy, 40, 15, (Color){80, 0, 130, 255});
+                DrawTriangle(
+                    (Vector2){(float)(cx-5), (float)(cy-19)},
+                    (Vector2){(float)cx,     (float)(cy-33)},
+                    (Vector2){(float)(cx+5), (float)(cy-19)},
+                    (Color){255, 160, 0, 255});
+                DrawCircle(cx - 7, cy - 5, 5, (Color){255, 80, 80, 255});
+                DrawCircle(cx + 7, cy - 5, 5, (Color){255, 80, 80, 255});
+                DrawCircle(cx - 7, cy - 5, 2, YELLOW);
+                DrawCircle(cx + 7, cy - 5, 2, YELLOW);
+                DrawRectangle(cx - 20, cy - 42, 40, 6, (Color){80, 20, 20, 255});
+                DrawRectangle(cx - 20, cy - 42, 20 * chefaoExtraVida[i], 6, RED);
+                DrawRectangleLines(cx - 20, cy - 42, 40, 6, WHITE);
+            }
+
+            // -- Jogador --
+            {
+                int jx = (int)jogador.x;
+                int jy = (int)jogador.y;
+
+                DrawRectangle(jx + 4,  jy,      32,  5, (Color){40, 25, 10, 255});
+                DrawRectangle(jx + 10, jy - 12, 20, 13, (Color){40, 25, 10, 255});
+                DrawRectangle(jx + 10, jy - 3,  20,  3, (Color){200, 120, 0, 255});
+                DrawCircle(jx + 20, jy + 12, 9, (Color){240, 200, 160, 255});
+                DrawCircle(jx + 16, jy + 10, 2, (Color){40, 30, 20, 255});
+                DrawCircle(jx + 24, jy + 10, 2, (Color){40, 30, 20, 255});
+                DrawLine(jx + 16, jy + 16, jx + 24, jy + 16, (Color){160, 100, 80, 255});
+                DrawRectangle(jx + 8,  jy + 21, 24, 20, (Color){80, 55, 30, 255});
+                DrawTriangle(
+                    (Vector2){(float)(jx+8),  (float)(jy+21)},
+                    (Vector2){(float)(jx+20), (float)(jy+30)},
+                    (Vector2){(float)(jx+8),  (float)(jy+35)},
+                    (Color){60, 40, 15, 255});
+                DrawTriangle(
+                    (Vector2){(float)(jx+32), (float)(jy+21)},
+                    (Vector2){(float)(jx+20), (float)(jy+30)},
+                    (Vector2){(float)(jx+32), (float)(jy+35)},
+                    (Color){60, 40, 15, 255});
+                DrawRectangle(jx + 8,  jy + 36,  24,  4, (Color){50, 35, 10, 255});
+                DrawRectangle(jx + 18, jy + 35,   5,  6, (Color){180, 140, 0, 255});
+                DrawRectangle(jx + 9,  jy + 41,   9, 13, (Color){45, 35, 55, 255});
+                DrawRectangle(jx + 22, jy + 41,   9, 13, (Color){45, 35, 55, 255});
+                DrawRectangle(jx + 7,  jy + 52,  11,  5, (Color){30, 20, 10, 255});
+                DrawRectangle(jx + 22, jy + 52,  11,  5, (Color){30, 20, 10, 255});
+                DrawRectangle(jx + 1,  jy + 22,   7, 16, (Color){80, 55, 30, 255});
+                DrawCircle(jx + 4, jy + 40, 4, (Color){240, 200, 160, 255});
+                DrawRectangle(jx + 32, jy + 22,   7, 16, (Color){80, 55, 30, 255});
+                DrawRectangle(jx + 34, jy + 34,  10,  8, (Color){60, 60, 70, 255});
+                DrawRectangle(jx + 35, jy + 35,   8,  3, (Color){120, 200, 255, 200});
+                DrawRectangle(jx + 38, jy + 30,   4,  5, (Color){80, 80, 90, 255});
+
+                // FIX: precedencia corrigida
+                Color corLuz = plasmaCarregado
+                    ? ((((int)(tempo * 8)) % 2 == 0)
+                       ? (Color){0, 220, 255, 255}
+                       : (Color){255, 255, 100, 255})
+                    : (Color){60, 60, 80, 255};
+                DrawCircle(jx + 40, jy + 29, 3, corLuz);
+            }
+
+            // Dica na base da tela
+            // FIX: substituiu a lambda C++ pela funcao ContarVivos() em C puro
+            if (plasmaCarregado)
+                DrawText("ESPACO = DISPARAR PLASMA!",
+                         10, ALTURA_TELA - 22, 15, (Color){0, 220, 255, 255});
+            else
+                DrawText(TextFormat("Onda %i  |  Fantasmas: %i/%i  |  P=pausar",
+                         onda,
+                         ContarVivos(fantasmaAtivo, numFantasmasOnda),
+                         numFantasmasOnda),
+                         10, ALTURA_TELA - 22, 14, LIGHTGRAY);
+        }
+
+        // ----- WIN -----
+        else if (estadoAtual == WIN)
+        {
+            ClearBackground((Color){5, 20, 10, 255});
+            for (int i = 0; i < 30; i++)
+                DrawCircle(
+                    (i * 137) % LARGURA_TELA,
+                    (i * 89 + (int)(tempo * 30)) % ALTURA_TELA,
+                    2, (Color){200, 255, 100, 180});
+
+            DrawText("YOU WIN!",
+                     220, 80, 68, (Color){100, 255, 100, 255});
+            DrawText("Todos os chefoes foram destruidos!",
+                     165, 178, 24, WHITE);
+            DrawText(TextFormat("Pontuacao: %i",  pontuacao), 275, 228, 26, YELLOW);
+            DrawText(TextFormat("Ondas: %i",      onda),      275, 264, 22, (Color){255, 200, 80, 255});
+            DrawText(TextFormat("Capturas: %i",   fantasmasCpt), 275, 296, 22, (Color){180, 130, 255, 255});
+            DrawText(TextFormat("Tempo: %.1fs",   tempo),     275, 326, 22, LIGHTGRAY);
+            DrawText("R  ->  Jogar novamente",    258, 380, 24, WHITE);
+            DrawText("M  ->  Menu",               258, 415, 24, LIGHTGRAY);
+        }
+
+        // ----- GAME OVER -----
+        else if (estadoAtual == GAME_OVER)
+        {
+            ClearBackground((Color){15, 10, 30, 255});
+            DrawText("GAME OVER",
+                     220, 90, 58, RED);
+            DrawText(TextFormat("Pontuacao: %i",    pontuacao),   258, 185, 28, WHITE);
+            DrawText(TextFormat("Onda chegou: %i",  onda),        258, 223, 24, (Color){255, 200, 80, 255});
+            DrawText(TextFormat("Capturas: %i",     fantasmasCpt),258, 257, 24, (Color){200, 160, 255, 255});
+            DrawText(TextFormat("Tempo: %.1fs",     tempo),       258, 289, 24, LIGHTGRAY);
+            DrawText("R  ->  Reiniciar", 270, 345, 24, WHITE);
+            DrawText("M  ->  Menu",      270, 383, 24, LIGHTGRAY);
+        }
+
+        EndDrawing();
+
+    } // fim do while
+
+    CloseWindow();
+    return 0;
+}
